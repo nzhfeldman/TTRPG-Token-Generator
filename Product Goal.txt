@@ -1,0 +1,85 @@
+
+# Goal
+
+My goal is to create a seamless generator for generating RPG tokens suitable for a virtual tabletop. The generator should be a standalone executable program that runs on a users computer and does not require an internet connection.
+
+These tokens would be used in Roll20, Foundry, and other Virtual Table Tops.
+
+# File structure
+
+You can do work and collect information in the "Claude-Token Generator" file, but the final product and everything needed to use it should be in the "Token Generator" file inside it. The internal file is what will be shared more broadly. Never edit anything outside the "Claude-Toke Generator" parent file.
+
+"Example tokens" contains tokens I've used in the past that I like. This is the style of object I'd like us to make.
+
+## Input Files
+
+Inputs: There should be three subfiles where users can store backgrounds, figures, and frames. They should accept png or webp inputs.
+
+Trimming tool: Recommend a tool for automatically "trimming" a figure or frame. That means converting the area around the main figure into transparency and for converting the area inside and outside the frame into transparency. Bonus: Integrate the tool into a separate window of the program GUI, letting the user experimentally add transparency themselves and then save the results back into the correct input folder (Would this be difficult to do?)
+
+## Output File
+
+Include a fourth subfile where printed tokens are automatically saved.
+
+
+# Token Anatomy
+
+Each token has three components: a background, a figure, and a frame. The Figure is a central character or creature of interest. The background is the terrain or coloration behind them, intended to emphasize the figure's affect or environment. The Frame is a relatively thin boundary that marks the edge of the tokens art; frames are often circular or hexagonal, but we should support decorated frames as well.
+
+Background images will generally be a full portrait or landscape. Figures are generally cut out with an outline around the figure of interest, leaving out an original background or other characters as transparent pixels. Frames have the most transparency, with transparency both outside, inside, and occasionally internally.
+
+# The Main Program
+
+The main program should feature a GUI window with three sections: Input, workspace, and outputs.
+
+## Inputs
+
+On the left, show three columns of images from the three input subfiles. Each column should automatically display the images in from newest to oldest. Bonus: Make the columns filterable by image name.
+
+The user can select images from this section, which causes them to populate in the workspace. At any time, the workspace can load up to 8 figures and up to 8 backgrounds, but only ever one frame at a time. The user can also click on an image again to deselect them, which removes them from the workspace.
+
+Automatically adjust the images so their displayed size in these columns is the same.
+
+Make inputs glow in their column while the cursor hovers over them, and make them continue to glow, but less brightly, while selected.
+
+At the top right, put a small button in red labeled "Clear" which deselects all images and removes them from the workspace.
+
+## Workspace: 
+
+A large open field in the center of the interface where populated images can be moved, stretched, and rotated. The images remain persistent after these operations. Images are added to the workspace from the inputs panel, and can be removed by clicking on them again or by using the "Clear" button.
+
+### Layering
+
+Let each image have an integer layer values, which controls which one is printed on top of another. Allow negative layers. Spawn backgrounds at layer -5, figures at layer 0, and the frame at layer 5. 
+
+The background of the Workspace should be a grey plane with even white gridlines. This gridding should be replaced by transparency if it is present in a final print.
+
+### Interaction
+
+Allow the user to left click on an object to move, stretch, or rotate it. Allow them to right click to directly control the layer value, as well as the position, stretch, and rotation. The right click menu should also allow them to deselect the image.
+
+## Outputs
+
+On the right show a single column with the results from printing the token and the "snapshots" from previous prints.
+
+### Preview
+
+In a medium square window at the top of this column, show a capture of a subset of the workspace. This capture should be a 400x400 pixel square wrapped tightly around the currently selected frame, following its position and orientation. The preview should show transparency outside the outer boundary of the selected frame, even if the background and figure images extend beyond it. When no frame is selected, simply show a blue box.
+
+Bonus: When no frame is present, the preview should instead show a stock image of dim grey gears. Have the gears retract swiftly when a frame is selected, and contract back into place when the frame is deselected (including when the "clear" button is hit).
+
+### Print
+
+At the top left of this panel, put a small green button labeled "Print". Upon printing, save a file exactly  matching the current Preview. 
+
+These printed outputs go to the "Tokens" subfolder by default. The save operation should initiate with a name inherited from the most recently selected "Figure", but the user should have an oportunity each time to choose a new save name.
+
+When the print button is hit, also make a record of the current workspace. Save this record only into the memory of the session, do not make a permanent file for it.
+
+### Session Memory
+
+Within a session in the program, take a snapshot whenever the user "prints" a token. Below the preview panel, display these printed tokens in a scrollable column (following the structure of the inputs column). When the user selects a previously printed token, clear the workspace and reload the workspace saved when that token was printed.
+
+
+
+ 
