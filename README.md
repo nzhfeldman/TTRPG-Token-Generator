@@ -1,10 +1,10 @@
 # RPG Token Generator
 
-A standalone desktop tool for compositing character tokens for virtual tabletops (Roll20, Foundry VTT, etc.). No internet connection or Python installation required.
+A standalone desktop tool for composing character tokens for virtual tabletops such as Roll20 or Foundry. The executable is open source python code, but you don't need python to download the app and run it.
 
 ## Download
 
-Go to the [Releases](../../releases) page and download the latest `RPG-Token-Generator-vX.X.X.zip`. Unzip it anywhere and run `RPG Token Generator.exe`.
+Go to the [Releases](../../releases) page and download the latest `RPG-Token-Generator-vX.X.X.zip`. You can unzip it anywhere and run `RPG Token Generator.exe`.
 
 ## Folder Structure
 
@@ -16,21 +16,19 @@ Frames/         ← drop your own frame overlays here
 Tokens/         ← exported tokens are saved here
 ```
 
-PNG, WebP, JPEG, and SVG files are supported. The app scans each folder on launch, so just add files and restart to see them.
+PNG, WebP, JPEG, and SVG files are supported. The app scans each folder every few seconds, so you can add files as you go.
 
 ## Making a Token
 
-**1. Pick a frame.** Click a frame in the right column of the Inputs panel. The frame defines the crop boundary for the exported token.
+**1. Pick a frame.** Click a frame in the right column of the Inputs panel. You can adjust it in the options bar at the bottom. The frame defines the orientation and crop boundary for the exported token, so you can only have one at a time.
 
-**2. Add a figure.** Click a character image in the center column. Drag, rotate, and resize it on the canvas using the handles that appear when you click it. Right-click for precise layer and position controls.
+**2. Add a figure.** Click a character image in the center column. You can adjust by left clicking and selecting a handle, or by right clicking for precise layer and position controls. You may have multiple at once.
 
-**3. Add a background (optional).** Click a background image in the left column. Backgrounds sit behind figures by default.
+**3. Add a background (optional).** Click a background image in the left column. Backgrounds sit behind figures by default. You may have multiple at once.
+
+Items can be deactivated by clicking them again.
 
 **4. Export.** Click the green Print button in the Output panel. The token is saved to the `Tokens/` folder, named after the active figure. You can rename it before saving.
-
-## Canvas Controls
-
-Left-click an item to select it and reveal transform handles. Drag the center to move, drag edges to scale, drag corners to scale while preserving aspect ratio, and drag the circular handle at the top to rotate. Right-click any item for a context menu with layer ordering, numeric position/scale/rotation inputs, and a remove option.
 
 ## Session Memory
 
