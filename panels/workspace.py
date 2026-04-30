@@ -872,11 +872,13 @@ class WorkspaceScene(QGraphicsScene):
             if frame_size is not None:
                 fw, fh = frame_size
                 if category == 'Figures':
-                    s = max(fw / pixmap.width(), fh / pixmap.height()) / 2
+                    n = math.floor(math.log2(0.75 * fw / pixmap.width()))
+                    s = 2.0 ** n
                     item._sx = s
                     item._sy = s
-                else:  # Backgrounds — uniform cover scale
-                    s = max(fw / pixmap.width(), fh / pixmap.height())
+                else:  # Backgrounds
+                    n = math.floor(math.log2(1.25 * fw / pixmap.width()))
+                    s = 2.0 ** n
                     item._sx = s
                     item._sy = s
             else:
