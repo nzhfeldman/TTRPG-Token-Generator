@@ -16,7 +16,7 @@ Frames/         ← drop your own frame overlays here
 Tokens/         ← exported tokens are saved here
 ```
 
-PNG, WebP, JPEG, and SVG files are supported. The app scans each folder every few seconds, so you can add files as you go.
+PNG, WebP, JPEG, and SVG files are supported. Each folder is rescanned every 2 seconds, so files dropped in while the app is running will appear automatically.
 
 ## Making a Token
 
@@ -38,7 +38,7 @@ Every exported token is listed in the Session Memory section of the Output panel
 
 ```bash
 pip install PyQt6 Pillow numpy
-python "Token Generator/main.py"
+python main.py
 ```
 
 To regenerate the bundled frames and backgrounds:
