@@ -6,6 +6,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QScrollArea, QInputDialog, QSizePolicy, QMessageBox,
 )
+from PIL import ImageFilter
 from PyQt6.QtCore import Qt, pyqtSignal, QRectF, QTimer
 from PyQt6.QtGui import QPainter, QColor, QBrush, QPen, QPixmap, QImage, QFont
 
@@ -54,7 +55,7 @@ def _outer_mask_from_frame(frame_pil: Image.Image) -> Image.Image:
     Falls back to a fully-opaque mask on any error so rendering never crashes.
     """
     try:
-        w, h = frame_pil.size
+        w, h  = frame_pil.size
         alpha = frame_pil.convert('RGBA').split()[3]
 
         # White = opaque frame pixel, black = transparent
@@ -71,10 +72,18 @@ def _outer_mask_from_frame(frame_pil: Image.Image) -> Image.Image:
 
         bordered = bordered.crop((1, 1, w + 1, h + 1))
 
-        data = np.array(bordered)
+        data    = np.array(bordered)
         outside = (data[:, :, 0] == 128) & (data[:, :, 1] == 128) & (data[:, :, 2] == 128)
-        result = np.where(outside, 0, 255).astype(np.uint8)
-        return Image.fromarray(result, mode='L')
+        result  = np.where(outside, 0, 255).astype(np.uint8)
+
+        # Erode the mask by 3 pixels so antialiased outer-edge pixels are covered.
+        # The 255 region is one connected blob (frame ring + interior hole), so
+        # erosion only shrinks the outer boundary — the inner edge is unaffected.
+        mask = Image.fromarray(result, mode='L')
+        mask = mask.filter(ImageFilter.MinFilter(3))
+        mask = mask.filter(ImageFilter.MinFilter(3))
+        mask = mask.filter(ImageFilter.MinFilter(3))
+        return mask
 
     except Exception:
         return Image.new('L', frame_pil.size, 255)
