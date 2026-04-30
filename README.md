@@ -56,3 +56,7 @@ build.bat
 ```
 
 The assembled release folder appears at `dist\release\`.
+
+## Art
+
+Level2Janitor provided the sample figures. See https://level2janitor.itch.io/ for more of his work.
