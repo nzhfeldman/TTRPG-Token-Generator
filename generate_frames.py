@@ -1,9 +1,9 @@
 """
 generate_frames.py  —  RPG Token Frame Generator
 Generates all token frame PNGs: plain colour frames + decorative frames.
-Output: Token Generator/Frames/frame_{shape}_{pattern}.png
+Output: Frames/frame_{shape}_{pattern}.png
 
-Run from the 'TTRPG Token Generator' root folder:
+Run from the Token Generator folder:
     python generate_frames.py
 """
 
@@ -12,7 +12,7 @@ import math
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter
 
-OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Token Generator", "Frames")
+OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Frames")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 SIZE   = 512

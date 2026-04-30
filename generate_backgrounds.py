@@ -1,9 +1,9 @@
 """
 generate_backgrounds.py  —  RPG Token Background Generator
 Generates chunky pixel-art background PNGs for the token generator.
-Output: Token Generator/Backgrounds/bg_{name}.png
+Output: Backgrounds/bg_{name}.png
 
-Run from the TTRPG Token Generator root:
+Run from the Token Generator folder:
     python generate_backgrounds.py
 """
 
@@ -12,7 +12,7 @@ import math
 import numpy as np
 from PIL import Image
 
-OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Token Generator", "Backgrounds")
+OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Backgrounds")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 SIZE  = 512
