@@ -1,0 +1,17 @@
+# Build artefacts
+build/
+dist/
+*.spec
+
+# Generated assets (rebuilt by CI)
+Frames/
+Backgrounds/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Editor / OS noise
+.Rhistory
+.DS_Store
+Thumbs.db
