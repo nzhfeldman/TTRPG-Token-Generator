@@ -1,12 +1,14 @@
 import math
+import numpy as np
+from PIL import Image, ImageEnhance
 from PyQt6.QtWidgets import (
     QGraphicsView, QGraphicsScene, QGraphicsObject, QMenu,
     QDialog, QFormLayout, QSpinBox, QDoubleSpinBox, QDialogButtonBox,
-    QGraphicsItem,
+    QGraphicsItem, QWidget, QHBoxLayout, QLabel, QSlider,
 )
-from PyQt6.QtCore import Qt, QRectF, QPointF, pyqtSignal, QSizeF
+from PyQt6.QtCore import Qt, QRectF, QPointF, pyqtSignal, QSizeF, QTimer
 from PyQt6.QtGui import (
-    QPainter, QPen, QBrush, QColor, QPixmap, QTransform, QPainterPath,
+    QPainter, QPen, QBrush, QColor, QPixmap, QTransform, QPainterPath, QImage,
 )
 from panels.utils import load_pixmap
 
@@ -24,6 +26,7 @@ _SCALE_HANDLES = {
     'l':  (0, 0.5),              'r':  (1, 0.5),
     'bl': (0, 1), 'b': (0.5, 1), 'br': (1, 1),
 }
+_ALL_HANDLES = list(_SCALE_HANDLES.keys()) + ['rot']
 
 
 def _dot(a: QPointF, b: QPointF) -> float:
@@ -34,6 +37,122 @@ def _norm(v: QPointF) -> QPointF:
     """Return v normalised to unit length, or (1,0) if v is near-zero."""
     mag = math.sqrt(v.x() ** 2 + v.y() ** 2)
     return QPointF(v.x() / mag, v.y() / mag) if mag > 1e-9 else QPointF(1.0, 0.0)
+
+
+# ------------------------------------------------------------------
+# PIL / QPixmap conversion and colour-adjustment helpers
+# ------------------------------------------------------------------
+
+def _qpixmap_to_pil(pixmap: QPixmap) -> Image.Image:
+    """Convert a QPixmap to a PIL RGBA Image via QImage."""
+    qimage = pixmap.toImage().convertToFormat(QImage.Format.Format_RGBA8888)
+    w, h = qimage.width(), qimage.height()
+    ptr = qimage.bits()
+    ptr.setsize(h * w * 4)
+    return Image.fromarray(
+        np.frombuffer(ptr, dtype=np.uint8).reshape((h, w, 4)).copy(), 'RGBA'
+    )
+
+
+def _pil_to_qpixmap(pil_img: Image.Image) -> QPixmap:
+    """Convert a PIL RGBA Image to a QPixmap."""
+    pil_img = pil_img.convert('RGBA')
+    data = pil_img.tobytes('raw', 'RGBA')
+    qimage = QImage(data, pil_img.width, pil_img.height, QImage.Format.Format_RGBA8888)
+    return QPixmap.fromImage(qimage)
+
+
+def _load_frame_pil(path: str, max_size: int = 1024) -> 'Image.Image | None':
+    """Load a frame image as PIL RGBA, rasterising SVGs via Qt if needed."""
+    try:
+        if path.lower().endswith('.svg'):
+            pixmap = load_pixmap(path, max_size=max_size)
+            if pixmap.isNull():
+                return None
+            return _qpixmap_to_pil(pixmap)
+        img = Image.open(path).convert('RGBA')
+        w, h = img.size
+        if max(w, h) > max_size:
+            scale = max_size / max(w, h)
+            img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+        return img
+    except Exception:
+        return None
+
+
+def _shift_hue(img_rgb: Image.Image, shift_deg: float) -> Image.Image:
+    """Rotate the hue of an RGB PIL image by shift_deg degrees using numpy.
+
+    Converts to HSV per-pixel using vectorised numpy arithmetic, rotates the
+    H channel, then converts back.  Achromatic pixels (s == 0) are unchanged.
+    """
+    arr = np.array(img_rgb, dtype=np.float32) / 255.0
+    r, g, b = arr[:, :, 0], arr[:, :, 1], arr[:, :, 2]
+
+    maxc  = np.maximum(np.maximum(r, g), b)
+    minc  = np.minimum(np.minimum(r, g), b)
+    v     = maxc
+    delta = maxc - minc
+    # Use np.divide with 'where' to avoid dividing by zero for achromatic pixels;
+    # numpy evaluates both branches of np.where eagerly, which triggers the warning.
+    s = np.zeros_like(maxc)
+    np.divide(delta, maxc, out=s, where=maxc > 0)
+
+    h  = np.zeros_like(maxc)
+    nz = delta > 0
+    rm = nz & (maxc == r)
+    gm = nz & (maxc == g)
+    bm = nz & (maxc == b)
+    h[rm] = ((g[rm] - b[rm]) / delta[rm]) % 6.0
+    h[gm] = (b[gm] - r[gm]) / delta[gm] + 2.0
+    h[bm] = (r[bm] - g[bm]) / delta[bm] + 4.0
+    h = (h / 6.0 + shift_deg / 360.0) % 1.0
+
+    h6 = h * 6.0
+    i  = np.floor(h6).astype(np.int32) % 6
+    f  = h6 - np.floor(h6)
+    p  = v * (1.0 - s)
+    q  = v * (1.0 - f * s)
+    t2 = v * (1.0 - (1.0 - f) * s)
+
+    out_r = np.choose(i, [v,  q,  p,  p, t2,  v])
+    out_g = np.choose(i, [t2, v,  v,  q,  p,  p])
+    out_b = np.choose(i, [p,  p, t2,  v,  v,  q])
+
+    ach = s == 0
+    out_r[ach] = v[ach]
+    out_g[ach] = v[ach]
+    out_b[ach] = v[ach]
+
+    arr_out = np.clip(
+        np.stack([out_r, out_g, out_b], axis=2) * 255.0, 0, 255
+    ).astype(np.uint8)
+    return Image.fromarray(arr_out, 'RGB')
+
+
+def _apply_color_adjustments(
+    img: Image.Image, hue_shift: int, value_adj: int, intensity_adj: int
+) -> Image.Image:
+    """Apply HSV-style colour adjustments to an RGBA image, preserving alpha.
+
+    intensity_adj controls saturation (ImageEnhance.Color), value_adj controls
+    brightness (ImageEnhance.Brightness), and hue_shift rotates the hue wheel.
+    Each adjustment uses factor = 1.0 + adj/100, clamped to ≥ 0.
+    """
+    if hue_shift == 0 and value_adj == 0 and intensity_adj == 0:
+        return img
+    r, g, b, a = img.split()
+    rgb = Image.merge('RGB', (r, g, b))
+
+    if intensity_adj != 0:
+        rgb = ImageEnhance.Color(rgb).enhance(max(0.0, 1.0 + intensity_adj / 100.0))
+    if value_adj != 0:
+        rgb = ImageEnhance.Brightness(rgb).enhance(max(0.0, 1.0 + value_adj / 100.0))
+    if hue_shift != 0:
+        rgb = _shift_hue(rgb, float(hue_shift))
+
+    r2, g2, b2 = rgb.split()
+    return Image.merge('RGBA', (r2, g2, b2, a))
 
 
 class TokenItem(QGraphicsObject):
@@ -213,7 +332,7 @@ class TokenItem(QGraphicsObject):
         """
         if not self.isSelected():
             return None
-        for name in list(_SCALE_HANDLES.keys()) + ['rot']:
+        for name in _ALL_HANDLES:
             if self._handle_rect(name).adjusted(-14, -14, 14, 14).contains(local_pos):
                 return name
         return None
@@ -337,12 +456,25 @@ class TokenItem(QGraphicsObject):
                 curr_dy = _dot(curr_offset, self._drag_y_axis)
 
                 sx, sy = self._drag_start_sx, self._drag_start_sy
+                ax, ay = _SCALE_HANDLES[handle]
+                is_corner = (ax != 0.5) and (ay != 0.5)
 
-                if ('r' in handle or 'l' in handle) and abs(self._drag_start_dist_x) > 0.5:
-                    sx = max(0.05, self._drag_start_sx * curr_dx / self._drag_start_dist_x)
-
-                if ('b' in handle or 't' in handle) and handle != 'rot' and abs(self._drag_start_dist_y) > 0.5:
-                    sy = max(0.05, self._drag_start_sy * curr_dy / self._drag_start_dist_y)
+                if is_corner:
+                    # Corner drag: project mouse onto the corner's diagonal and
+                    # derive one k factor applied to both axes, preserving aspect ratio.
+                    sign_x = 1.0 if ax > 0.5 else -1.0
+                    sign_y = 1.0 if ay > 0.5 else -1.0
+                    start_diag = sign_x * self._drag_start_dist_x + sign_y * self._drag_start_dist_y
+                    curr_diag  = sign_x * curr_dx + sign_y * curr_dy
+                    if abs(start_diag) > 0.5:
+                        k = curr_diag / start_diag
+                        sx = max(0.05, self._drag_start_sx * k)
+                        sy = max(0.05, self._drag_start_sy * k)
+                else:
+                    if ('r' in handle or 'l' in handle) and abs(self._drag_start_dist_x) > 0.5:
+                        sx = max(0.05, self._drag_start_sx * curr_dx / self._drag_start_dist_x)
+                    if ('b' in handle or 't' in handle) and abs(self._drag_start_dist_y) > 0.5:
+                        sy = max(0.05, self._drag_start_sy * curr_dy / self._drag_start_dist_y)
 
                 self._sx, self._sy = sx, sy
                 self._apply_transform()
@@ -505,6 +637,151 @@ class TokenItem(QGraphicsObject):
 
 
 # ------------------------------------------------------------------
+# Frame overlay item — fixed, centred, non-interactive
+# ------------------------------------------------------------------
+
+class FrameOverlayItem(QGraphicsObject):
+    """A frame image that always sits centred at the scene origin and cannot be
+    moved or selected.
+
+    All adjustments (size, rotation, hue, value, intensity) are applied through
+    update_params().  Scale and rotation are handled by Qt transforms; colour
+    adjustments recompute the cached QPixmap via PIL.
+    """
+
+    def __init__(self, pixmap: QPixmap, pil_image: Image.Image, path: str):
+        """Store the source PIL image and set up a fully non-interactive item.
+
+        Args:
+            pixmap:    Initial QPixmap (unadjusted); used to set widget dimensions.
+            pil_image: RGBA PIL image; kept as the base for colour recomputation.
+            path:      Absolute path to the source file.
+        """
+        super().__init__()
+        self.path = path
+        self.category = 'Frames'
+
+        self._pil_base = pil_image
+        self._pw = pixmap.width()
+        self._ph = pixmap.height()
+        self._pixmap = pixmap   # current (possibly colour-adjusted) pixmap
+
+        # Slider state
+        self._size_pct     = 100.0
+        self._rotation_deg = 0.0
+        self._hue_shift    = 0
+        self._value_adj    = 0
+        self._intensity_adj = 0
+
+        # Downsample the PIL image used for colour adjustment to at most 512 px.
+        # The export output is only 400 px, so this is lossless for the final
+        # result while making hue/value/intensity recomputation ~4× faster.
+        _THUMB = 512
+        if max(pil_image.width, pil_image.height) > _THUMB:
+            scale = _THUMB / max(pil_image.width, pil_image.height)
+            self._pil_base = pil_image.resize(
+                (int(pil_image.width * scale), int(pil_image.height * scale)),
+                Image.Resampling.LANCZOS,
+            )
+        else:
+            self._pil_base = pil_image
+
+        self.setZValue(LAYER_FRAME)
+        # Centre the item on the scene origin
+        self.setPos(-self._pw / 2, -self._ph / 2)
+        # Rotate / scale around the pixmap centre
+        self.setTransformOriginPoint(self._pw / 2, self._ph / 2)
+        # No interactivity
+        self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        self.setAcceptHoverEvents(False)
+
+    # ------------------------------------------------------------------
+    # QGraphicsItem interface
+    # ------------------------------------------------------------------
+
+    def boundingRect(self) -> QRectF:
+        """Return the tight pixmap rect in local coordinates."""
+        return QRectF(0, 0, self._pw, self._ph)
+
+    def paint(self, painter: QPainter, option, widget=None):
+        """Draw the (possibly colour-adjusted) pixmap at the item's natural size."""
+        painter.drawPixmap(0, 0, self._pw, self._ph, self._pixmap)
+
+    # ------------------------------------------------------------------
+    # Parameter update
+    # ------------------------------------------------------------------
+
+    def update_params(
+        self,
+        size_pct: float,
+        rotation_deg: float,
+        hue_shift: int,
+        value_adj: int,
+        intensity_adj: int,
+    ):
+        """Apply new slider values.
+
+        Colour adjustments (hue/value/intensity) only trigger PIL reprocessing
+        when their values actually change; transform (size/rotation) is always
+        applied via a fast QTransform update.
+        """
+        color_changed = (
+            hue_shift    != self._hue_shift
+            or value_adj != self._value_adj
+            or intensity_adj != self._intensity_adj
+        )
+
+        self._size_pct      = size_pct
+        self._rotation_deg  = rotation_deg
+        self._hue_shift     = hue_shift
+        self._value_adj     = value_adj
+        self._intensity_adj = intensity_adj
+
+        if color_changed:
+            adjusted = _apply_color_adjustments(
+                self._pil_base, hue_shift, value_adj, intensity_adj
+            )
+            self._pixmap = _pil_to_qpixmap(adjusted)
+
+        # Rebuild the QTransform so the item scales from its centre
+        s = size_pct / 100.0
+        t = QTransform()
+        t.translate(self._pw / 2, self._ph / 2)
+        t.scale(s, s)
+        t.translate(-self._pw / 2, -self._ph / 2)
+        self.setTransform(t)
+        self.setRotation(rotation_deg)
+        self.update()
+
+        if self.scene():
+            self.scene().interaction_ended.emit()
+
+    def get_params(self) -> tuple:
+        """Return (size_pct, rotation_deg, hue_shift, value_adj, intensity_adj)."""
+        return (
+            self._size_pct, self._rotation_deg,
+            self._hue_shift, self._value_adj, self._intensity_adj,
+        )
+
+    # ------------------------------------------------------------------
+    # State serialisation
+    # ------------------------------------------------------------------
+
+    def get_state(self) -> dict:
+        """Serialise the frame's adjustable state for session memory."""
+        return {
+            'path':         self.path,
+            'category':     'Frames',
+            'layer':        LAYER_FRAME,
+            'size_pct':     self._size_pct,
+            'rotation':     self._rotation_deg,
+            'hue_shift':    self._hue_shift,
+            'value_adj':    self._value_adj,
+            'intensity_adj': self._intensity_adj,
+        }
+
+
+# ------------------------------------------------------------------
 # Scene
 # ------------------------------------------------------------------
 
@@ -526,6 +803,7 @@ class WorkspaceScene(QGraphicsScene):
         self.setSceneRect(-2000, -2000, 4000, 4000)
         self._items: dict[str, TokenItem] = {}  # path -> item
         self._frame: TokenItem | None = None
+        self._reference_frame_size: tuple[float, float] | None = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -536,12 +814,24 @@ class WorkspaceScene(QGraphicsScene):
         """The currently active frame TokenItem, or None if no frame is loaded."""
         return self._frame
 
+    def set_reference_frame_size(self, w: float, h: float):
+        """Store fallback frame dimensions used for auto-scaling when no frame is active."""
+        self._reference_frame_size = (w, h)
+
+    def _get_effective_frame_size(self) -> 'tuple[float, float] | None':
+        """Return the frame's current display size, or the stored fallback if no frame is active."""
+        if self._frame is not None:
+            s = self._frame._size_pct / 100.0
+            return (self._frame._pw * s, self._frame._ph * s)
+        return self._reference_frame_size
+
     def add_image(self, path: str, category: str) -> bool:
         """Load an image from disk and add it to the workspace, returning False if refused.
 
         Refuses to add if the per-category limit is already reached (8 figures or
         8 backgrounds).  Adding a new frame automatically removes any existing
-        frame first.  The item is spawned centred at the scene origin.
+        frame first.  Frames are added as a fixed FrameOverlayItem centred at the
+        scene origin; figures and backgrounds are added as movable TokenItems.
         """
         if path in self._items:
             return True
@@ -558,31 +848,46 @@ class WorkspaceScene(QGraphicsScene):
         if category == 'Frames' and self._frame is not None:
             self._remove_item(self._frame)
 
-        # SVGs are rasterised to 1024 px on their longest side so they remain
-        # sharp when scaled up on the canvas; raster files load at native size.
-        pixmap = load_pixmap(path, max_size=1024)
-        if pixmap.isNull():
-            return False
-
-        layer = {'Backgrounds': LAYER_BG, 'Figures': LAYER_FIG, 'Frames': LAYER_FRAME}[category]
-        item = TokenItem(pixmap, path, category, layer)
-        item.setPos(-pixmap.width() / 2, -pixmap.height() / 2)
-
-        # Figures and backgrounds often come in at high resolution; spawn them
-        # at quarter-size so they don't overwhelm the canvas on first load.
-        if category != 'Frames':
-            item._sx = 0.25
-            item._sy = 0.25
-            item._apply_transform()
-
-        item.removal_requested.connect(self._remove_item)
-
-        self.addItem(item)
-        self._items[path] = item
-
         if category == 'Frames':
+            # Frames load as a fixed, non-interactive overlay with colour controls
+            pil_img = _load_frame_pil(path)
+            if pil_img is None:
+                return False
+            pixmap = _pil_to_qpixmap(pil_img)
+            item = FrameOverlayItem(pixmap, pil_img, path)
+            self.addItem(item)
+            self._items[path] = item
             self._frame = item
+            self._reference_frame_size = (float(pixmap.width()), float(pixmap.height()))
             self.frame_changed.emit(item)
+        else:
+            # Figures and backgrounds are movable TokenItems
+            pixmap = load_pixmap(path, max_size=1024)
+            if pixmap.isNull():
+                return False
+            layer = {'Backgrounds': LAYER_BG, 'Figures': LAYER_FIG}[category]
+            item = TokenItem(pixmap, path, category, layer)
+            item.setPos(-pixmap.width() / 2, -pixmap.height() / 2)
+            frame_size = self._get_effective_frame_size()
+            if frame_size is not None:
+                fw, fh = frame_size
+                if category == 'Figures':
+                    # Scale to nearest power of 2 so figure width falls in [0.5*fw, fw]
+                    n = math.floor(math.log2(fw / pixmap.width()))
+                    s = 2.0 ** n
+                    item._sx = s
+                    item._sy = s
+                else:  # Backgrounds — uniform cover scale
+                    s = max(fw / pixmap.width(), fh / pixmap.height())
+                    item._sx = s
+                    item._sy = s
+            else:
+                item._sx = 0.25
+                item._sy = 0.25
+            item._apply_transform()
+            item.removal_requested.connect(self._remove_item)
+            self.addItem(item)
+            self._items[path] = item
 
         self.interaction_ended.emit()
         return True
@@ -603,6 +908,18 @@ class WorkspaceScene(QGraphicsScene):
             self.frame_changed.emit(None)
         self.interaction_ended.emit()
 
+    def update_frame_params(
+        self,
+        size_pct: float,
+        rotation_deg: float,
+        hue_shift: int,
+        value_adj: int,
+        intensity_adj: int,
+    ):
+        """Forward slider values to the active FrameOverlayItem (no-op if no frame)."""
+        if self._frame is not None:
+            self._frame.update_params(size_pct, rotation_deg, hue_shift, value_adj, intensity_adj)
+
     def get_active_paths(self) -> set[str]:
         """Return the set of file paths for all items currently in the workspace."""
         return set(self._items.keys())
@@ -620,25 +937,41 @@ class WorkspaceScene(QGraphicsScene):
 
         Items are added in layer order (lowest first) so Z-ordering is correct
         before any painting occurs.  Items whose source files can no longer be
-        found are silently skipped.
+        found are silently skipped.  Frames are restored as FrameOverlayItems with
+        their saved colour/transform parameters; other items are restored as TokenItems.
         """
         self.clear_all()
-        for state in sorted(states, key=lambda s: s['layer']):
-            item = TokenItem.from_state(state)
-            if item is None:
-                continue
-            item.removal_requested.connect(self._remove_item)
-            self.addItem(item)
-            self._items[state['path']] = item
+        for state in sorted(states, key=lambda s: s.get('layer', LAYER_FRAME)):
             if state['category'] == 'Frames':
+                pil_img = _load_frame_pil(state['path'])
+                if pil_img is None:
+                    continue
+                pixmap = _pil_to_qpixmap(pil_img)
+                item = FrameOverlayItem(pixmap, pil_img, state['path'])
+                item.update_params(
+                    state.get('size_pct', 100.0),
+                    state.get('rotation', 0.0),
+                    state.get('hue_shift', 0),
+                    state.get('value_adj', 0),
+                    state.get('intensity_adj', 0),
+                )
+                self.addItem(item)
+                self._items[state['path']] = item
                 self._frame = item
                 self.frame_changed.emit(item)
+            else:
+                item = TokenItem.from_state(state)
+                if item is None:
+                    continue
+                item.removal_requested.connect(self._remove_item)
+                self.addItem(item)
+                self._items[state['path']] = item
 
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
 
-    def _remove_item(self, item: TokenItem):
+    def _remove_item(self, item):
         """Internal removal that cleans up tracking dicts and emits the appropriate signals.
 
         Called both by remove_image() (user deselects thumbnail) and by the
@@ -733,6 +1066,133 @@ class WorkspaceView(QGraphicsView):
             event.accept()
             return
         super().mouseReleaseEvent(event)
+
+
+# ------------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------------
+
+# ------------------------------------------------------------------
+# Frame toolbar
+# ------------------------------------------------------------------
+
+class FrameToolbar(QWidget):
+    """A horizontal toolbar with sliders for adjusting the active frame.
+
+    Emits frame_params_changed(size_pct, rotation, hue, value, intensity) whenever
+    any slider is moved.  Size and rotation sliders emit immediately (cheap QTransform
+    update); hue, value, and intensity sliders are debounced by 80 ms to avoid
+    triggering expensive PIL reprocessing on every pixel of movement.
+    """
+
+    frame_params_changed = pyqtSignal(float, float, int, int, int)
+
+    def __init__(self, parent=None):
+        """Build the five labeled-slider groups and wire their signals."""
+        super().__init__(parent)
+        self.setFixedHeight(52)
+        self.setEnabled(False)
+        self.setStyleSheet(
+            "FrameToolbar { background: #252525; border-top: 1px solid #3a3a3a; }"
+        )
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 6, 10, 6)
+        layout.setSpacing(10)
+
+        lbl = QLabel("Frame:")
+        lbl.setStyleSheet("color: #aaa; font-size: 10px; font-weight: bold;")
+        layout.addWidget(lbl)
+
+        # (slider, value_label, suffix) — kept for reset() / set_params()
+        self._controls: list[tuple] = []
+
+        self._size_sl = self._add_slider(layout, "Size",      10, 300,  100, "%")
+        self._rot_sl  = self._add_slider(layout, "Rotation", -180, 180,    0, "°")
+        self._hue_sl  = self._add_slider(layout, "Hue",      -180, 180,    0, "")
+        self._val_sl  = self._add_slider(layout, "Value",    -100, 100,    0, "")
+        self._int_sl  = self._add_slider(layout, "Intensity",-100, 100,    0, "")
+
+        layout.addStretch()
+
+        # Debounce timer for PIL-heavy colour sliders
+        self._color_debounce = QTimer()
+        self._color_debounce.setSingleShot(True)
+        self._color_debounce.setInterval(80)
+        self._color_debounce.timeout.connect(self._emit)
+
+        # Size and rotation: emit immediately (no PIL work)
+        self._size_sl.valueChanged.connect(lambda _: self._on_transform_changed())
+        self._rot_sl .valueChanged.connect(lambda _: self._on_transform_changed())
+        # Hue, value, intensity: debounce
+        self._hue_sl.valueChanged.connect(lambda _: self._on_color_changed())
+        self._val_sl.valueChanged.connect(lambda _: self._on_color_changed())
+        self._int_sl.valueChanged.connect(lambda _: self._on_color_changed())
+
+    def _add_slider(self, layout, name: str, lo: int, hi: int, default: int, suffix: str) -> QSlider:
+        """Add a (label, slider, value_label) group to the layout and return the slider."""
+        lbl = QLabel(name + ":")
+        lbl.setStyleSheet("color: #999; font-size: 10px;")
+        layout.addWidget(lbl)
+
+        sl = QSlider(Qt.Orientation.Horizontal)
+        sl.setRange(lo, hi)
+        sl.setValue(default)
+        sl.setFixedWidth(90)
+        sl.setStyleSheet(
+            "QSlider::groove:horizontal { height: 4px; background: #444; border-radius: 2px; }"
+            "QSlider::handle:horizontal { width: 12px; height: 12px; margin: -4px 0;"
+            "  background: #888; border-radius: 6px; }"
+            "QSlider::sub-page:horizontal { background: #5a9fd4; border-radius: 2px; }"
+        )
+        layout.addWidget(sl)
+
+        val_lbl = QLabel(f"{default}{suffix}")
+        val_lbl.setFixedWidth(38)
+        val_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        val_lbl.setStyleSheet("color: #ccc; font-size: 10px;")
+        layout.addWidget(val_lbl)
+
+        # Sync the value label on every slider change (cheap — just text update)
+        sl.valueChanged.connect(lambda v, vl=val_lbl, s=suffix: vl.setText(f"{v}{s}"))
+
+        self._controls.append((sl, val_lbl, suffix))
+        return sl
+
+    def _on_transform_changed(self):
+        """Emit immediately when size or rotation changes (no PIL involved)."""
+        self._emit()
+
+    def _on_color_changed(self):
+        """Restart the debounce timer when a colour slider changes."""
+        self._color_debounce.start()
+
+    def _emit(self):
+        """Fire frame_params_changed with the current slider values."""
+        self.frame_params_changed.emit(
+            float(self._size_sl.value()),
+            float(self._rot_sl.value()),
+            self._hue_sl.value(),
+            self._val_sl.value(),
+            self._int_sl.value(),
+        )
+
+    def reset(self):
+        """Reset all sliders to their defaults without emitting frame_params_changed."""
+        defaults = [100, 0, 0, 0, 0]
+        for (sl, val_lbl, suffix), default in zip(self._controls, defaults):
+            sl.blockSignals(True)
+            sl.setValue(default)
+            sl.blockSignals(False)
+            val_lbl.setText(f"{default}{suffix}")
+
+    def set_params(self, size_pct: float, rotation: float, hue: int, value: int, intensity: int):
+        """Set all sliders to the given values, triggering a normal emission."""
+        self._size_sl.setValue(int(round(size_pct)))
+        self._rot_sl .setValue(int(round(rotation)))
+        self._hue_sl .setValue(int(hue))
+        self._val_sl .setValue(int(value))
+        self._int_sl .setValue(int(intensity))
 
 
 # ------------------------------------------------------------------

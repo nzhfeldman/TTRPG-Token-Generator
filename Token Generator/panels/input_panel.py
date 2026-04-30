@@ -298,6 +298,7 @@ class ImageColumn(QWidget):
         self.folder = folder
         self.category = category
         self._thumbnails: dict[str, ImageThumbnail] = {}  # path -> widget
+        self._sorted_paths: list[str] = []  # last known mtime-sorted order
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -374,22 +375,21 @@ class ImageColumn(QWidget):
             thumb.clicked.connect(self._on_thumb_clicked)
             self._thumbnails[path] = thumb
 
-        # Re-insert all in sorted (newest-first) order.
-        # Use takeAt() for spacer items (which have no .widget()) so they are
-        # discarded rather than left to accumulate on every refresh cycle.
-        for i in reversed(range(self._list_layout.count())):
-            item = self._list_layout.itemAt(i)
-            if item and item.widget():
-                self._list_layout.removeWidget(item.widget())
-            else:
-                self._list_layout.takeAt(i)
-
-        for path in files:
-            if path in self._thumbnails:
+        # Re-insert in sorted order only when the order has actually changed.
+        # On a quiet 2-second tick with no file additions/deletions this is a no-op.
+        new_order = [p for p in files if p in self._thumbnails]
+        if new_order != self._sorted_paths:
+            self._sorted_paths = new_order
+            for i in reversed(range(self._list_layout.count())):
+                item = self._list_layout.itemAt(i)
+                if item and item.widget():
+                    self._list_layout.removeWidget(item.widget())
+                else:
+                    self._list_layout.takeAt(i)
+            for path in new_order:
                 self._list_layout.addWidget(self._thumbnails[path])
-        self._list_layout.addStretch()
-
-        self._apply_filter(self._filter.text())
+            self._list_layout.addStretch()
+            self._apply_filter(self._filter.text())
 
     def deselect_all(self):
         """Deselect every thumbnail in this column without emitting signals."""
@@ -466,9 +466,9 @@ class InputPanel(QWidget):
 
         self._columns: list[ImageColumn] = []
         for title, category in [
+            ("Frames",      "Frames"),
             ("Backgrounds", "Backgrounds"),
             ("Figures",     "Figures"),
-            ("Frames",      "Frames"),
         ]:
             col = ImageColumn(title, os.path.join(base_dir, category), category)
             col.image_activated.connect(self.image_activated)

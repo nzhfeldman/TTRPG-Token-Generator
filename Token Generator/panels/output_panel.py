@@ -4,7 +4,7 @@ from PIL import Image, ImageDraw
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QScrollArea, QInputDialog, QSizePolicy,
+    QScrollArea, QInputDialog, QSizePolicy, QMessageBox,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QRectF, QTimer
 from PyQt6.QtGui import QPainter, QColor, QBrush, QPen, QPixmap, QImage, QFont
@@ -112,6 +112,11 @@ class PreviewWidget(QWidget):
         self._frame_item = None
         self._pixmap: QPixmap | None = None
         self._dirty = True
+        # Cache: key is (frame.path, *frame.get_params()); value is (frame_pil, outer_mask).
+        # Avoids re-rendering the frame and recomputing the mask when only non-frame
+        # items have moved.
+        self._frame_render_cache: tuple | None = None
+        self._frame_render_cache_key: tuple | None = None
 
         self.setFixedSize(PREVIEW_SIZE, PREVIEW_SIZE)
 
@@ -130,6 +135,8 @@ class PreviewWidget(QWidget):
             frame_item: A TokenItem, or None if no frame is loaded.
         """
         self._frame_item = frame_item
+        self._frame_render_cache     = None
+        self._frame_render_cache_key = None
         self._mark_dirty()
 
     def _mark_dirty(self):
@@ -195,29 +202,35 @@ class PreviewWidget(QWidget):
         self._scene.render(p, target, frame_scene_rect)
         p.end()
 
-        # --- Pass 2: frame-only render for mask extraction ---
-        # Hide every non-frame item; render off-screen; restore immediately.
-        frame_img = QImage(size, size, QImage.Format.Format_ARGB32)
-        frame_img.fill(Qt.GlobalColor.transparent)
-
-        hidden = [i for i in self._scene.items() if i is not frame]
-        for i in hidden:
-            i.setVisible(False)
-        try:
-            p2 = QPainter(frame_img)
-            p2.setRenderHints(
-                QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform
-            )
-            self._scene.render(p2, target, frame_scene_rect)
-            p2.end()
-        finally:
+        # --- Pass 2: frame-only render for mask extraction (cached) ---
+        # The frame's visual output and derived mask only change when its own
+        # parameters change.  Skip the expensive show/hide scene render on hits.
+        cache_key = (frame.path,) + frame.get_params()
+        if cache_key == self._frame_render_cache_key:
+            frame_pil, outer_mask = self._frame_render_cache
+        else:
+            frame_img = QImage(size, size, QImage.Format.Format_ARGB32)
+            frame_img.fill(Qt.GlobalColor.transparent)
+            hidden = [i for i in self._scene.items() if i is not frame]
             for i in hidden:
-                i.setVisible(True)
+                i.setVisible(False)
+            try:
+                p2 = QPainter(frame_img)
+                p2.setRenderHints(
+                    QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform
+                )
+                self._scene.render(p2, target, frame_scene_rect)
+                p2.end()
+            finally:
+                for i in hidden:
+                    i.setVisible(True)
+            frame_pil  = _qimage_to_pil(frame_img)
+            outer_mask = _outer_mask_from_frame(frame_pil)
+            self._frame_render_cache     = (frame_pil, outer_mask)
+            self._frame_render_cache_key = cache_key
 
         # --- Apply mask ---
-        composite  = _qimage_to_pil(full_img)
-        frame_pil  = _qimage_to_pil(frame_img)
-        outer_mask = _outer_mask_from_frame(frame_pil)
+        composite = _qimage_to_pil(full_img)
 
         r, g, b, a = composite.split()
         clipped_a  = Image.fromarray(
@@ -419,6 +432,7 @@ class OutputPanel(QWidget):
         try:
             pil_image.save(path, 'PNG')
         except Exception as e:
+            QMessageBox.warning(self, "Save Failed", f"Could not save token:\n{e}")
             return
 
         # Prepend the new entry to the top of the session list (above the stretch)

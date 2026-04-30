@@ -1,4 +1,22 @@
+# Build artefacts
+build/
+dist/
+*.spec
+
+# Generated assets (rebuilt by CI)
+Token Generator/Frames/
+Token Generator/Backgrounds/
+
+# Python bytecode
 __pycache__/
-*.pyc
-*.pyo
-Token Generator/Tokens/
+*.py[cod]
+
+# Editor / OS noise
+.Rhistory
+Token Generator/.Rhistory
+Token Generator/panels/.Rhistory
+.DS_Store
+Thumbs.db
+
+# Claude Code internal files
+.claude/
