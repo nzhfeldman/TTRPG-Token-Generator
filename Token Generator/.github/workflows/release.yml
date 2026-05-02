@@ -1,0 +1,87 @@
+name: Build & Release
+
+# Runs when you push a version tag (e.g. git tag v1.0.0 && git push origin v1.0.0)
+# Can also be triggered manually from the Actions tab on GitHub.
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write   # required to create a release and upload assets
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install PyQt6 Pillow numpy pyinstaller
+
+      # ── Generate assets ──────────────────────────────────────────
+      - name: Generate frames
+        run: python generate_frames.py
+
+      - name: Generate backgrounds
+        run: python generate_backgrounds.py
+
+      # ── Build ────────────────────────────────────────────────────
+      - name: Build executable
+        shell: pwsh
+        run: |
+          python -m PyInstaller `
+            --onefile `
+            --windowed `
+            --name RPGTokenGenerator `
+            --hidden-import PyQt6.QtSvg `
+            main.py
+
+      # ── Assemble release folder ───────────────────────────────────
+      - name: Assemble release folder
+        shell: pwsh
+        run: |
+          $rel = "dist\release"
+          New-Item -ItemType Directory -Path $rel -Force | Out-Null
+
+          Move-Item "dist\RPGTokenGenerator.exe" "$rel\RPG Token Generator.exe"
+
+          Copy-Item -Recurse "Backgrounds" "$rel\Backgrounds"
+          Copy-Item -Recurse "Frames"      "$rel\Frames"
+
+          if (Test-Path "Figures") {
+            Copy-Item -Recurse "Figures" "$rel\Figures"
+          } else {
+            New-Item -ItemType Directory -Path "$rel\Figures" -Force | Out-Null
+          }
+
+          New-Item -ItemType Directory -Path "$rel\Tokens" -Force | Out-Null
+
+      # ── Zip ──────────────────────────────────────────────────────
+      - name: Zip release
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $zip = "dist\RPG-Token-Generator-$tag.zip"
+          Compress-Archive -Path "dist\release\*" -DestinationPath $zip
+          $mb = [math]::Round((Get-Item $zip).Length / 1MB, 1)
+          Write-Host "Archive size: $mb MB"
+
+      # ── Publish ──────────────────────────────────────────────────
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $zip = "dist\RPG-Token-Generator-$tag.zip"
+          gh release create $tag $zip `
+            --title "RPG Token Generator $tag" `
+            --generate-notes

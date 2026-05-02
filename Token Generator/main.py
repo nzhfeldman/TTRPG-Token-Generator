@@ -1,15 +1,9 @@
-"""RPG Token Generator — entry point.
-
-Run with:
-    python main.py
-
-Requires: PyQt6, Pillow, numpy  (pip install -r requirements.txt)
-"""
+"""RPG Token Generator — entry point."""
 
 import sys
 import os
+import json
 
-# Ensure the 'panels' package is importable when running from any working directory
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from PyQt6.QtWidgets import QApplication, QMainWindow, QSplitter, QWidget, QVBoxLayout
@@ -17,62 +11,80 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QPalette, QColor
 
 from panels.input_panel import InputPanel
-from panels.workspace import WorkspaceView, WorkspaceScene, FrameToolbar
+from panels.workspace import WorkspaceView, WorkspaceScene, FrameToolbar, WorkspaceTopBar
 from panels.output_panel import OutputPanel
 
-# When frozen by PyInstaller (--onefile) sys.executable is the .exe path;
-# its directory is where the user placed the asset folders.
-# When running from source, fall back to the script's own directory.
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-TOKENS_DIR = os.path.join(BASE_DIR, "Tokens")
+CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+
+_DEFAULT_FOLDERS = {
+    "Backgrounds": os.path.join(BASE_DIR, "Backgrounds"),
+    "Figures":     os.path.join(BASE_DIR, "Figures"),
+    "Frames":      os.path.join(BASE_DIR, "Frames"),
+    "Tokens":      os.path.join(BASE_DIR, "Tokens"),
+}
+
+
+def _load_config() -> dict:
+    """Return folder paths from config.json, falling back to defaults for missing keys."""
+    paths = dict(_DEFAULT_FOLDERS)
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        saved = data.get("folders", {})
+        for key in _DEFAULT_FOLDERS:
+            if key in saved and saved[key]:
+                paths[key] = saved[key]
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    return paths
+
+
+def _save_config(paths: dict):
+    try:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump({"folders": paths}, f, indent=2)
+    except Exception:
+        pass
 
 
 class MainWindow(QMainWindow):
-    """Top-level window that owns the three panels and wires their signals together.
-
-    Layout (left to right inside a QSplitter):
-      - InputPanel     — file columns + Clear button
-      - WorkspaceView  — interactive canvas
-      - OutputPanel    — preview + Print + session memory
-
-    Signal flow:
-      InputPanel  →  scene.add_image / scene.remove_image
-      scene       →  output_panel.preview.update_frame  (frame changed)
-      scene       →  input_panel.deselect_path          (item removed via right-click)
-      OutputPanel →  _handle_print                      (Print button)
-      OutputPanel →  _restore_workspace                 (session entry clicked)
-    """
-
     def __init__(self):
-        """Construct all panels, connect signals, and set the initial splitter sizes."""
         super().__init__()
         self.setWindowTitle("RPG Token Generator")
         self.setMinimumSize(1300, 750)
         self.resize(1600, 900)
 
-        # Shared scene — single source of truth for workspace items
-        self._scene = WorkspaceScene()
+        self._folder_paths = _load_config()
 
+        self._scene = WorkspaceScene()
         self._input_panel   = InputPanel(BASE_DIR)
         self._workspace     = WorkspaceView(self._scene)
+        self._top_bar       = WorkspaceTopBar()
         self._frame_toolbar = FrameToolbar()
-        self._output_panel  = OutputPanel(self._scene, TOKENS_DIR)
+        self._output_panel  = OutputPanel(
+            self._scene, self._folder_paths["Tokens"]
+        )
 
-        # Ordered list of active figure paths (most recently activated is last)
         self._active_figures: list[str] = []
+
+        # Apply saved folder paths to columns
+        for category in ("Backgrounds", "Figures", "Frames"):
+            self._input_panel.set_folder(category, self._folder_paths[category])
 
         self._connect_signals()
         self._init_reference_frame_size()
 
-        # Wrap the canvas and frame toolbar together so they behave as one splitter panel
+        # Workspace container: top bar + canvas + frame toolbar
         workspace_container = QWidget()
         wc_layout = QVBoxLayout(workspace_container)
         wc_layout.setContentsMargins(0, 0, 0, 0)
         wc_layout.setSpacing(0)
+        wc_layout.addWidget(self._top_bar)
         wc_layout.addWidget(self._workspace)
         wc_layout.addWidget(self._frame_toolbar)
 
@@ -80,12 +92,10 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self._input_panel)
         splitter.addWidget(workspace_container)
         splitter.addWidget(self._output_panel)
-        # Centre panel stretches; side panels start at a fixed comfortable width
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setStretchFactor(2, 0)
         splitter.setSizes([330, 820, 450])
-        # Prevent any panel from being dragged to zero width
         for i in range(3):
             splitter.setCollapsible(i, False)
         self._input_panel.setMinimumWidth(180)
@@ -94,39 +104,33 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(splitter)
 
+    # ------------------------------------------------------------------
+    # Signal wiring
+    # ------------------------------------------------------------------
+
     def _connect_signals(self):
-        """Wire all cross-panel signals in one place for easy auditing."""
-        # Thumbnail selection → workspace
         self._input_panel.image_activated.connect(self._on_image_activated)
         self._input_panel.image_deactivated.connect(self._on_image_deactivated)
 
-        # Clear button → scene + input panel (input panel deselects itself via its own slot)
-        self._input_panel.clear_requested.connect(self._scene.clear_all)
+        self._top_bar.clear_requested.connect(self._scene.clear_all)
+        self._top_bar.clear_requested.connect(self._on_clear)
+        self._top_bar.clear_requested.connect(self._input_panel.deselect_all)
 
-        # Frame change → preview + toolbar state
         self._scene.frame_changed.connect(self._on_frame_changed)
-
-        # Frame toolbar sliders → scene frame params
         self._frame_toolbar.frame_params_changed.connect(self._scene.update_frame_params)
-
-        # Item removed via right-click → deselect the corresponding thumbnail
         self._scene.item_removed.connect(self._on_item_removed)
 
-        # Clear → reset active-figures tracking
-        self._input_panel.clear_requested.connect(self._on_clear)
-
-        # Print button → capture + save
         self._output_panel.print_requested.connect(self._handle_print)
-
-        # Session entry clicked → restore workspace
         self._output_panel.restore_requested.connect(self._restore_workspace)
 
+        self._top_bar.files_requested.connect(self._show_files_dialog)
+        self._top_bar.pdf_requested.connect(self._show_pdf_dialog)
+
     # ------------------------------------------------------------------
-    # Signal handlers
+    # Frame / image handlers
     # ------------------------------------------------------------------
 
     def _on_frame_changed(self, item):
-        """Update the preview and the frame toolbar when the active frame changes."""
         self._output_panel.preview.update_frame(item)
         if item is None:
             self._frame_toolbar.reset()
@@ -134,11 +138,11 @@ class MainWindow(QMainWindow):
         else:
             self._frame_toolbar.setEnabled(True)
             self._frame_toolbar.set_params(*item.get_params())
-            # Keep the reference size current so newly placed items scale correctly
-            self._scene.set_reference_frame_size(float(item._pw), float(item._ph))
+            self._scene.set_reference_frame_size(
+                float(item._out_width), float(item._out_height)
+            )
 
     def _on_image_activated(self, path: str, category: str):
-        """Add the image to the scene; deselect its thumbnail if the limit was reached."""
         added = self._scene.add_image(path, category)
         if not added:
             self._input_panel.deselect_path(path, category)
@@ -149,36 +153,36 @@ class MainWindow(QMainWindow):
             self._update_last_figure_name()
 
     def _on_image_deactivated(self, path: str, category: str):
-        """Remove the image from the scene when the user deselects its thumbnail."""
         self._scene.remove_image(path, category)
         if category == 'Figures':
             self._active_figures = [p for p in self._active_figures if p != path]
             self._update_last_figure_name()
 
     def _on_item_removed(self, path: str, category: str):
-        """Deselect the thumbnail when an item is removed via the right-click context menu."""
         self._input_panel.deselect_path(path, category)
         if category == 'Figures':
             self._active_figures = [p for p in self._active_figures if p != path]
             self._update_last_figure_name()
 
     def _on_clear(self):
-        """Reset active-figure tracking when the workspace is cleared."""
         self._active_figures.clear()
 
     def _update_last_figure_name(self):
-        """Set the output panel's default print name to the most recently activated figure."""
         if self._active_figures:
-            self._output_panel.set_last_figure(os.path.basename(self._active_figures[-1]))
+            self._output_panel.set_last_figure(
+                os.path.basename(self._active_figures[-1])
+            )
 
     def _init_reference_frame_size(self):
-        """Read the topmost frame file's dimensions and store them as the auto-scale fallback."""
-        frames_col = next((c for c in self._input_panel._columns if c.category == 'Frames'), None)
+        frames_col = next(
+            (c for c in self._input_panel._columns if c.category == 'Frames'), None
+        )
         if frames_col is None:
             return
         try:
             files = sorted(
-                [os.path.join(frames_col.folder, f) for f in os.listdir(frames_col.folder)
+                [os.path.join(frames_col.folder, f)
+                 for f in os.listdir(frames_col.folder)
                  if f.lower().endswith(('.png', '.webp', '.jpg', '.jpeg', '.svg'))],
                 key=os.path.getmtime, reverse=True,
             )
@@ -189,47 +193,101 @@ class MainWindow(QMainWindow):
                 from panels.utils import load_pixmap
                 px = load_pixmap(path, max_size=4096)
                 if not px.isNull():
-                    self._scene.set_reference_frame_size(float(px.width()), float(px.height()))
+                    s = min(400.0 / px.width(), 400.0 / px.height())
+                    self._scene.set_reference_frame_size(px.width() * s, px.height() * s)
             else:
                 from PIL import Image
                 img = Image.open(path)
                 w, h = img.size
-                if max(w, h) > 1024:
-                    scale = 1024 / max(w, h)
-                    w, h = int(w * scale), int(h * scale)
-                self._scene.set_reference_frame_size(float(w), float(h))
+                s = min(400.0 / w, 400.0 / h)
+                self._scene.set_reference_frame_size(w * s, h * s)
         except Exception:
             pass
 
+    # ------------------------------------------------------------------
+    # Print
+    # ------------------------------------------------------------------
+
     def _handle_print(self):
-        """Render the current token and hand it to the output panel to save and archive."""
-        image = self._output_panel.preview.render_token()
-        if image is not None:
-            state = self._scene.get_workspace_state()
-            self._output_panel.save_token(image, state)
+        """Show print options dialog, render at the frame's output size, and save."""
+        from panels.dialogs import PrintOptionsDialog
 
-    def _restore_workspace(self, state: list):
-        """Clear the current workspace and rebuild it from a session memory snapshot.
+        w, h = self._scene.get_output_size()
+        last_name = getattr(self._output_panel, '_last_figure_name', 'token')
+        dlg = PrintOptionsDialog(
+            default_name=last_name,
+            tokens_dir=self._folder_paths["Tokens"],
+            output_size=(w, h),
+            initial_settings=self._output_panel.get_print_settings(),
+            parent=self,
+        )
+        if dlg.exec() != dlg.DialogCode.Accepted:
+            return
 
-        Also re-selects the thumbnails that correspond to restored items so the
-        input panel stays in sync with what is visible on the canvas.
-        """
+        settings = dlg.get_settings()
+        settings["width"]  = w
+        settings["height"] = h
+        image = self._output_panel.preview.render_token(w, h)
+        if image is None:
+            return
+
+        state = self._scene.get_workspace_state()
+        self._output_panel.save_token(image, state, settings)
+
+    # ------------------------------------------------------------------
+    # Restore workspace
+    # ------------------------------------------------------------------
+
+    def _restore_workspace(self, state: list, print_settings: dict):
         self._input_panel.deselect_all()
         self._active_figures.clear()
         self._scene.restore_workspace_state(state)
 
-        # Re-select the thumbnails for all restored items
         active_paths = self._scene.get_active_paths()
         for col in self._input_panel._columns:
             for path, thumb in col._thumbnails.items():
                 if path in active_paths:
                     thumb.selected = True
 
-        # Rebuild active figures from the restored state (layer order as proxy for activation order)
         for s in sorted(state, key=lambda x: x.get('layer', 0)):
             if s.get('category') == 'Figures' and s['path'] in active_paths:
                 self._active_figures.append(s['path'])
         self._update_last_figure_name()
+
+        # Restore print settings into the output panel
+        if print_settings:
+            self._output_panel._print_settings = dict(print_settings)
+
+    # ------------------------------------------------------------------
+    # Files dialog
+    # ------------------------------------------------------------------
+
+    def _show_files_dialog(self):
+        from panels.dialogs import FilesDialog
+        dlg = FilesDialog(dict(self._folder_paths), parent=self)
+        if dlg.exec() != dlg.DialogCode.Accepted:
+            return
+
+        new_paths = dlg.get_paths()
+        changed = {k for k in new_paths if new_paths[k] != self._folder_paths.get(k)}
+        self._folder_paths.update(new_paths)
+        _save_config(self._folder_paths)
+
+        # Apply changes live
+        for category in ("Backgrounds", "Figures", "Frames"):
+            if category in changed:
+                self._input_panel.set_folder(category, new_paths[category])
+        if "Tokens" in changed:
+            self._output_panel.set_tokens_dir(new_paths["Tokens"])
+
+    # ------------------------------------------------------------------
+    # PDF dialog
+    # ------------------------------------------------------------------
+
+    def _show_pdf_dialog(self):
+        from panels.dialogs import PDFExtractDialog
+        dlg = PDFExtractDialog(dict(self._folder_paths), parent=self)
+        dlg.exec()
 
 
 # ------------------------------------------------------------------
@@ -237,7 +295,6 @@ class MainWindow(QMainWindow):
 # ------------------------------------------------------------------
 
 def _apply_dark_theme(app: QApplication):
-    """Apply a dark QPalette so native widgets (scrollbars, dialogs) match the dark UI."""
     p = QPalette()
     p.setColor(QPalette.ColorRole.Window,          QColor(30, 30, 30))
     p.setColor(QPalette.ColorRole.WindowText,      QColor(220, 220, 220))
