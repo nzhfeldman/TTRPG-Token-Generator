@@ -197,8 +197,13 @@ def gen_mountains() -> np.ndarray:
             x1 = max(x0, min(G, px - w + max(1, w // 3)))
             buf[y, x0:x1] = SNOWS if y < ty + sr else ROCK_L
 
-    for tx in range(1, G, 6):
-        pine_tree(buf, tx, 49, TRUNK, PINE if tx % 2 else PINE_L)
+    # Scattered pines across lower half — jittered grid for natural clustering
+    _rng = np.random.default_rng(7)
+    for base_x in range(1, G, 5):
+        tx = base_x + int(_rng.integers(-2, 3))
+        gy = 49 + int(_rng.integers(0, 12))
+        if 0 <= tx < G:
+            pine_tree(buf, tx, gy, TRUNK, PINE if tx % 2 else PINE_L)
 
     cloud(buf,  4,  9, 12, 3, CLD, CLDS)
     cloud(buf, 42,  7, 11, 3, CLD, CLDS)
@@ -521,13 +526,22 @@ def _build_frame_backgrounds():
 
 if __name__ == "__main__":
 
+    fbgs  = _build_frame_backgrounds()
+    plain = {k: v for k, v in fbgs.items() if k.startswith("plain_")}
+    fancy = {k: v for k, v in fbgs.items() if not k.startswith("plain_")}
+
     print("-- Pixel-art backgrounds ------------------------------------")
     for name, fn in BACKGROUNDS.items():
         save(name, fn())
 
-    print("\n-- Frame-pattern backgrounds --------------------------------")
-    for name, fn in _build_frame_backgrounds().items():
+    print("\n-- Frame-pattern backgrounds (metallic / wood) --------------")
+    for name, fn in fancy.items():
         save_raw(name, fn())
 
-    total = len(BACKGROUNDS) + len(_build_frame_backgrounds())
+    # Plain colours written last → newest mtime → appear at top of input panel
+    print("\n-- Plain-colour backgrounds ---------------------------------")
+    for name, fn in plain.items():
+        save_raw(name, fn())
+
+    total = len(BACKGROUNDS) + len(fbgs)
     print(f"\nDone. {total} backgrounds written to:\n  {OUTPUT_DIR}")

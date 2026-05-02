@@ -361,7 +361,7 @@ def apply_corrosion(base_fn, corrosion_rgb: tuple, seed: int,
 
     SMIN_K = 10.0   # fillet radius (px) at the circle→triangle junction
 
-    while covered_fraction <= 0.40 and total_drips < 200:
+    while covered_fraction <= 0.60 and total_drips < 200:
         for _ in range(3):
             if total_drips >= 200:
                 break
@@ -570,23 +570,24 @@ def save_frame(shape: str, pattern: str, texture: np.ndarray):
 if __name__ == "__main__":
     count = 0
 
-    print("-- Plain colour frames --------------------------------------")
-    for pattern, (r, g, b) in PLAIN_COLORS.items():
-        texture = gen_solid(r, g, b)
-        for shape in SHAPES:
-            save_frame(shape, pattern, texture)
-            count += 1
-
-    print("\n-- Decorative frames ----------------------------------------")
+    # Decorative frames written first so plain colours end up with the newest
+    # mtime and therefore sort to the top of the input panel.
+    print("-- Decorative frames ----------------------------------------")
     for pattern, gen_fn in FANCY_PATTERNS.items():
         base_seed = CORROSION_BASE_SEEDS.get(pattern)
         for i, shape in enumerate(SHAPES):
-            # Corrosion patterns get a unique seed per shape so drip layouts differ.
-            # All other patterns generate once and are deterministic anyway.
             if base_seed is not None:
                 texture = gen_fn(seed=base_seed + i * 997)
             else:
                 texture = gen_fn()
+            save_frame(shape, pattern, texture)
+            count += 1
+
+    # Plain colours written last → newest mtime → appear at top of input panel
+    print("\n-- Plain colour frames --------------------------------------")
+    for pattern, (r, g, b) in PLAIN_COLORS.items():
+        texture = gen_solid(r, g, b)
+        for shape in SHAPES:
             save_frame(shape, pattern, texture)
             count += 1
 
