@@ -6,8 +6,8 @@ import base64
 
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QLabel, QPushButton,
-    QLineEdit, QComboBox, QSpinBox, QFileDialog, QScrollArea, QWidget,
-    QMessageBox, QDialogButtonBox,
+    QLineEdit, QComboBox, QSpinBox, QAbstractSpinBox, QFileDialog, QScrollArea,
+    QWidget, QMessageBox, QDialogButtonBox,
 )
 from PyQt6.QtCore import Qt, QRectF
 from PyQt6.QtGui import QPixmap, QImage
@@ -217,15 +217,17 @@ class PDFExtractDialog(QDialog):
 
         # Page range
         range_row = QHBoxLayout()
-        range_row.addWidget(QLabel("Page range (leave blank for all):"))
+        range_row.addWidget(QLabel("Page range:"))
         self._page_from = QSpinBox()
         self._page_from.setRange(1, 9999)
         self._page_from.setValue(1)
-        self._page_from.setFixedWidth(64)
+        self._page_from.setFixedWidth(90)
+        self._page_from.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         self._page_to = QSpinBox()
         self._page_to.setRange(1, 9999)
         self._page_to.setValue(9999)
-        self._page_to.setFixedWidth(64)
+        self._page_to.setFixedWidth(90)
+        self._page_to.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
         range_row.addWidget(QLabel("From:"))
         range_row.addWidget(self._page_from)
         range_row.addWidget(QLabel("To:"))
@@ -316,6 +318,8 @@ class PDFExtractDialog(QDialog):
         self._tmp_dir = tempfile.mkdtemp(prefix="token_gen_pdf_")
 
         count = 0
+        seen_names: set = set()
+
         for page_idx in range(page_from, page_to):
             try:
                 page = reader.pages[page_idx]
@@ -327,30 +331,58 @@ class PDFExtractDialog(QDialog):
 
             for img_obj in page.images:
                 try:
-                    ext = os.path.splitext(img_obj.name)[1].lower()
-                    if ext not in ('.png', '.jpg', '.jpeg', '.webp', '.bmp', '.tiff', '.tif'):
-                        ext = '.png'
-                    fname = f"page{page_idx + 1}_{img_obj.name or f'img{count}'}{ext}"
-                    # Sanitize filename
+                    # Skip images already seen (PDF resources are shared across pages)
+                    img_name = img_obj.name or f"img{count}"
+                    if img_name in seen_names:
+                        continue
+                    seen_names.add(img_name)
+
+                    # Determine original extension; keep it (including .jp2)
+                    orig_ext = os.path.splitext(img_name)[1].lower()
+                    if not orig_ext:
+                        orig_ext = '.png'
+
+                    fname = f"page{page_idx + 1}_{img_name}"
                     fname = "".join(c for c in fname if c.isalnum() or c in ('_', '-', '.'))
                     out_path = os.path.join(self._tmp_dir, fname)
+
                     with open(out_path, 'wb') as f:
                         f.write(img_obj.data)
 
+                    # Try loading with Qt directly
+                    px = QPixmap(out_path)
+
+                    # Fallback: use PIL for formats Qt can't handle (jp2, tiff, etc.)
+                    if px.isNull():
+                        try:
+                            from PIL import Image as _PILImage
+                            png_fname = os.path.splitext(fname)[0] + '.png'
+                            png_path = os.path.join(self._tmp_dir, png_fname)
+                            with _PILImage.open(out_path) as pil_img:
+                                pil_img.convert('RGBA').save(png_path, 'PNG')
+                            px = QPixmap(png_path)
+                            out_path = png_path
+                            fname = png_fname
+                        except Exception:
+                            pass
+
                     self._extracted.append((out_path, fname))
 
-                    # Thumbnail
-                    px = QPixmap(out_path)
                     if not px.isNull():
-                        px = px.scaled(80, 80,
-                                       Qt.AspectRatioMode.KeepAspectRatio,
-                                       Qt.TransformationMode.SmoothTransformation)
+                        thumb = px.scaled(80, 80,
+                                          Qt.AspectRatioMode.KeepAspectRatio,
+                                          Qt.TransformationMode.SmoothTransformation)
                         lbl = QLabel()
-                        lbl.setPixmap(px)
+                        lbl.setPixmap(thumb)
                         lbl.setFixedSize(88, 88)
                         lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
                         lbl.setStyleSheet("background: #2a2a2a; border: 1px solid #444;")
                         lbl.setToolTip(fname)
+                        lbl.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+                        lbl.customContextMenuRequested.connect(
+                            lambda pos, p=out_path, f=fname, w=lbl:
+                                self._thumb_context_menu(pos, p, f, w)
+                        )
                         row, col = divmod(count, 5)
                         self._grid.addWidget(lbl, row, col)
 
@@ -362,6 +394,45 @@ class PDFExtractDialog(QDialog):
             f"{count} image{'s' if count != 1 else ''} extracted from "
             f"pages {page_from + 1}–{page_to}."
         )
+
+    def _thumb_context_menu(self, pos, img_path: str, fname: str, widget: QLabel):
+        from PyQt6.QtWidgets import QMenu, QInputDialog
+        # Allow renaming before sending
+        stem, ext = os.path.splitext(fname)
+        new_stem, ok = QInputDialog.getText(
+            self, "Rename Image", "Filename (without extension):", text=stem
+        )
+        if not ok:
+            return
+        new_stem = new_stem.strip()
+        if new_stem:
+            fname = new_stem + ext
+
+        menu = QMenu(self)
+        for key in ["Backgrounds", "Figures", "Frames", "Tokens"]:
+            action = menu.addAction(f"Send to {key}")
+            action.triggered.connect(
+                lambda _, k=key, p=img_path, f=fname: self._send_one_to(k, p, f)
+            )
+        menu.exec(widget.mapToGlobal(pos))
+
+    def _send_one_to(self, folder_key: str, img_path: str, fname: str):
+        dest = self._folder_paths.get(folder_key, "")
+        if not dest:
+            QMessageBox.warning(self, "No Folder", f"No path set for {folder_key}.")
+            return
+        os.makedirs(dest, exist_ok=True)
+        dst = os.path.join(dest, fname)
+        base, ext = os.path.splitext(dst)
+        n = 1
+        while os.path.exists(dst):
+            dst = f"{base}_{n}{ext}"
+            n += 1
+        try:
+            shutil.copy2(img_path, dst)
+            self._status_lbl.setText(f"Sent {fname} → {folder_key}.")
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Could not copy file:\n{e}")
 
     def _send_to(self, folder_key: str):
         if not self._extracted:
